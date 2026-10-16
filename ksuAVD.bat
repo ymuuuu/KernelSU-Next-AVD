@@ -11,6 +11,7 @@ set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "APPS_DIR=%SCRIPT_DIR%\Apps"
 set "ADB_REMOTE_TMP=/data/local/tmp/ksuAVD"
+set "UPSTREAM_REPO=KernelSU-Next/KernelSU-Next"
 
 REM Locate Android SDK & ADB
 call :FindSDK
@@ -18,37 +19,57 @@ call :FindADB
 
 REM Parse arguments
 set "ARG1=%~1"
-set "ARG2=%~2"
-set "ARG3=%~3"
 set "DEBUG_MODE=0"
 set "DO_RESTORE=0"
+set "SHOW_HELP=0"
 set "KSU_FLAVOR=normal"
+set "KSU_CI_RUN="
+set "KSU_APK_OVERRIDE="
+set "TARGET_RAMDISK="
 
 if /i "%ARG1%"=="InstallApps" (
     call :RunInstallApps
     exit /b %ERRORLEVEL%
 )
 
-if /i "%ARG1%"=="restore" (
+REM Keywords are position independent; the first non-keyword argument is the
+REM ramdisk path.
+:ParseLoop
+if "%~1"=="" goto :ParseDone
+set "ARGV=%~1"
+if /i "!ARGV!"=="restore" (
     set "DO_RESTORE=1"
-    set "TARGET_RAMDISK=%~2"
+) else if /i "!ARGV!"=="DEBUG" (
+    set "DEBUG_MODE=1"
+) else if /i "!ARGV!"=="spoofed" (
+    set "KSU_FLAVOR=spoofed"
+) else if /i "!ARGV!"=="-h" (
+    set "SHOW_HELP=1"
+) else if /i "!ARGV!"=="--help" (
+    set "SHOW_HELP=1"
+) else if /i "!ARGV!"=="/?" (
+    set "SHOW_HELP=1"
+) else if /i "!ARGV!"=="help" (
+    set "SHOW_HELP=1"
+) else if /i "!ARGV:~0,3!"=="ci=" (
+    set "KSU_CI_RUN=!ARGV:~3!"
+) else if /i "!ARGV:~0,4!"=="apk=" (
+    set "KSU_APK_OVERRIDE=!ARGV:~4!"
 ) else (
-    set "TARGET_RAMDISK=%~1"
+    if not defined TARGET_RAMDISK set "TARGET_RAMDISK=!ARGV!"
+)
+shift
+goto :ParseLoop
+:ParseDone
+
+if defined KSU_CI_RUN if defined KSU_APK_OVERRIDE (
+    echo [x] Error: ci= and apk= cannot be combined. Pick one APK source.
+    exit /b 1
 )
 
-if /i "%ARG2%"=="restore" set "DO_RESTORE=1"
-if /i "%ARG2%"=="DEBUG" set "DEBUG_MODE=1"
-if /i "%ARG3%"=="DEBUG" set "DEBUG_MODE=1"
-if /i "%ARG2%"=="spoofed" set "KSU_FLAVOR=spoofed"
-if /i "%ARG3%"=="spoofed" set "KSU_FLAVOR=spoofed"
-
 REM If no target specified or help requested
-if "%TARGET_RAMDISK%"=="" goto :HelpExit
-
-if /i "%ARG1%"=="-h" goto :HelpExit
-if /i "%ARG1%"=="--help" goto :HelpExit
-if /i "%ARG1%"=="/?" goto :HelpExit
-if /i "%ARG1%"=="help" goto :HelpExit
+if not defined TARGET_RAMDISK goto :HelpExit
+if "%SHOW_HELP%"=="1" goto :HelpExit
 goto :StartOperation
 
 :HelpExit
@@ -66,7 +87,7 @@ if not exist "%TARGET_RAMDISK%" (
         set "TARGET_RAMDISK=%SDK_DIR%\%TARGET_RAMDISK%"
     ) else (
         echo [x] Error: Target ramdisk file not found:
-        echo     "%ARG1%"
+        echo     "%TARGET_RAMDISK%"
         echo.
         call :ShowHelpAndFoundImages
         exit /b 1
@@ -260,6 +281,131 @@ echo   Kernel:          !DEV_KERNEL!
 echo.
 exit /b 0
 
+REM Reject an APK that cannot supply ksud, before anything is pushed. Without
+REM lib/<abi>/libksud.so the device-side stage fails much later and much less
+REM obviously, inside the emulator. A zip we cannot inspect is let through.
+:VerifyManagerApk
+set "APK_CHECK=%~1"
+powershell -NoProfile -Command ^
+    "try { " ^
+    "  Add-Type -AssemblyName System.IO.Compression.FileSystem; " ^
+    "  $zip = [IO.Compression.ZipFile]::OpenRead($env:APK_CHECK); " ^
+    "  $hit = $zip.Entries | Where-Object { $_.FullName -like 'lib/*/libksud.so' } | Select-Object -First 1; " ^
+    "  $zip.Dispose(); " ^
+    "  if ($hit) { exit 0 } else { exit 1 } " ^
+    "} catch { exit 0 }"
+if %ERRORLEVEL% neq 0 (
+    echo [x] Error: this does not look like a KernelSU Next manager APK:
+    echo     "%APK_CHECK%"
+    echo     It contains no lib/^<abi^>/libksud.so, so ksud cannot be extracted.
+    exit /b 1
+)
+exit /b 0
+
+REM Accepts a bare run id, or any Actions URL that contains /runs/<id>.
+:ParseRunId
+set "RID=%~1"
+set "RID_WORK=!RID:runs/=|!"
+if not "!RID_WORK!"=="!RID!" (
+    for /f "tokens=2 delims=|" %%a in ("!RID_WORK!") do set "RID=%%a"
+)
+for /f "tokens=1 delims=/?#" %%a in ("!RID!") do set "RID=%%a"
+echo !RID!| findstr /r "^[0-9][0-9]*$" >nul
+if %ERRORLEVEL% neq 0 (
+    echo [x] Error: could not read a run id from:
+    echo     "%~1"
+    echo     Pass the numeric run id, or the full Actions URL of the run.
+    exit /b 1
+)
+set "RUN_ID=!RID!"
+exit /b 0
+
+:FetchCiApk
+call :ParseRunId "%KSU_CI_RUN%"
+if %ERRORLEVEL% neq 0 exit /b 1
+
+if /i "%KSU_FLAVOR%"=="spoofed" (
+    set "CI_ARTIFACT=manager-spoofed"
+    set "CI_CACHE=%APPS_DIR%\KernelSU-ci-!RUN_ID!-spoofed.apk"
+) else (
+    set "CI_ARTIFACT=manager"
+    set "CI_CACHE=%APPS_DIR%\KernelSU-ci-!RUN_ID!.apk"
+)
+
+if exist "!CI_CACHE!" (
+    call :VerifyManagerApk "!CI_CACHE!"
+    if !ERRORLEVEL! neq 0 exit /b 1
+    set "KSU_APK_PATH=!CI_CACHE!"
+    echo [-] Using cached CI build: "!CI_CACHE!"
+    exit /b 0
+)
+
+echo [*] Fetching artifact "!CI_ARTIFACT!" from %UPSTREAM_REPO% run !RUN_ID!...
+if not exist "%APPS_DIR%" mkdir "%APPS_DIR%"
+set "CI_TMP=%APPS_DIR%\.ci-!RUN_ID!"
+if exist "!CI_TMP!" rd /s /q "!CI_TMP!"
+mkdir "!CI_TMP!"
+
+set "CI_OK=0"
+where gh >nul 2>&1
+if !ERRORLEVEL! equ 0 (
+    gh auth status >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        echo [-] Downloading with the gh CLI...
+        gh run download !RUN_ID! -R %UPSTREAM_REPO% -n "!CI_ARTIFACT!" -D "!CI_TMP!" >nul 2>&1
+        if !ERRORLEVEL! equ 0 (
+            set "CI_OK=1"
+        ) else (
+            echo [-] gh could not fetch "!CI_ARTIFACT!", trying the mirror.
+        )
+    )
+)
+
+REM GitHub's own artifact endpoint requires a token. nightly.link mirrors
+REM artifacts of public repositories without one.
+if "!CI_OK!"=="0" (
+    set "CI_URL=https://nightly.link/%UPSTREAM_REPO%/actions/runs/!RUN_ID!/!CI_ARTIFACT!.zip"
+    set "CI_ZIP=!CI_TMP!\artifact.zip"
+    echo [-] Downloading from !CI_URL!
+    powershell -NoProfile -Command ^
+        "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; " ^
+        "try { " ^
+        "  Invoke-WebRequest -Uri $env:CI_URL -OutFile $env:CI_ZIP; " ^
+        "  Expand-Archive -LiteralPath $env:CI_ZIP -DestinationPath $env:CI_TMP -Force; " ^
+        "  exit 0 " ^
+        "} catch { exit 1 }"
+    if !ERRORLEVEL! equ 0 set "CI_OK=1"
+)
+
+set "CI_APK="
+if "!CI_OK!"=="1" (
+    for /f "delims=" %%f in ('dir "!CI_TMP!\*.apk" /s /b /a-d 2^>nul') do (
+        if not defined CI_APK set "CI_APK=%%f"
+    )
+)
+
+if not defined CI_APK (
+    if exist "!CI_TMP!" rd /s /q "!CI_TMP!"
+    echo [x] Error: run !RUN_ID! has no "!CI_ARTIFACT!" artifact.
+    echo     Only "Build Manager CI" runs publish manager APKs, and artifacts
+    echo     expire 90 days after the run. Check what this run actually built:
+    echo     https://github.com/%UPSTREAM_REPO%/actions/runs/!RUN_ID!
+    exit /b 1
+)
+
+REM Verify before caching, so a bad artifact never becomes a cache entry that
+REM later runs would pick up.
+call :VerifyManagerApk "!CI_APK!"
+if %ERRORLEVEL% neq 0 (
+    if exist "!CI_TMP!" rd /s /q "!CI_TMP!"
+    exit /b 1
+)
+move /y "!CI_APK!" "!CI_CACHE!" >nul
+if exist "!CI_TMP!" rd /s /q "!CI_TMP!"
+set "KSU_APK_PATH=!CI_CACHE!"
+echo [V] CI build saved to "!CI_CACHE!"
+exit /b 0
+
 :EnsureKernelSUApk
 set "KSU_APK_PATH="
 if /i "%KSU_FLAVOR%"=="spoofed" (
@@ -267,6 +413,26 @@ if /i "%KSU_FLAVOR%"=="spoofed" (
 ) else (
     set "KSU_APK_NAME=KernelSU.apk"
 )
+
+REM Source priority: apk= override, ci= artifact, drop-in file, latest release.
+if defined KSU_APK_OVERRIDE (
+    if not exist "%KSU_APK_OVERRIDE%" (
+        echo [x] Error: supplied APK not found:
+        echo     "%KSU_APK_OVERRIDE%"
+        exit /b 1
+    )
+    call :VerifyManagerApk "%KSU_APK_OVERRIDE%"
+    if !ERRORLEVEL! neq 0 exit /b 1
+    set "KSU_APK_PATH=%KSU_APK_OVERRIDE%"
+    echo [-] Using supplied manager APK: "%KSU_APK_OVERRIDE%"
+    exit /b 0
+)
+
+if defined KSU_CI_RUN (
+    call :FetchCiApk
+    exit /b !ERRORLEVEL!
+)
+
 if exist "%APPS_DIR%\%KSU_APK_NAME%" (
     set "KSU_APK_PATH=%APPS_DIR%\%KSU_APK_NAME%"
     exit /b 0
@@ -297,8 +463,10 @@ powershell -NoProfile -Command ^
     "}"
 
 if exist "%APPS_DIR%\%KSU_APK_NAME%" (
+    call :VerifyManagerApk "%APPS_DIR%\%KSU_APK_NAME%"
+    if !ERRORLEVEL! neq 0 exit /b 1
     set "KSU_APK_PATH=%APPS_DIR%\%KSU_APK_NAME%"
-    echo [V] Downloaded successfully to "%KSU_APK_PATH%".
+    echo [V] Downloaded successfully to "%APPS_DIR%\%KSU_APK_NAME%".
     exit /b 0
 )
 
@@ -355,6 +523,12 @@ echo Options:
 echo   restore      Restore original ramdisk from ramdisk.img.backup
 echo   DEBUG        Keep temporary working files on AVD (/data/local/tmp/ksuAVD)
 echo   spoofed      Use the spoofed package-ID manager APK variant
+echo   ci=^<run^>     Use the manager APK built by an upstream Actions run,
+echo                before it is released. Takes a run id or an Actions URL.
+echo   apk=^<path^>   Use this manager APK file, at any path or filename.
+echo.
+echo Manager APK source priority: apk=, then ci=, then a drop-in file in
+echo Apps\ or next to the script, then the latest upstream release.
 echo.
 echo --- Available System Images / AVDs Detected on This Machine ---
 set "FOUND_COUNT=0"

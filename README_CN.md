@@ -122,6 +122,10 @@ ksuAVD.bat "D:\Android\AVD\Pixel_10_Pro.avd\ramdisk.img"
 - `restore`：还原备份的 ramdisk（见第 5 节）。
 - `DEBUG`：保留模拟器上 `/data/local/tmp/ksuAVD` 内的临时工作文件。
 - `spoofed`：使用伪装包名（spoofed）版本的管理器 APK。
+- `ci=<run>`：使用上游 CI 构建的管理器 APK，无需等待正式发布。
+- `apk=<path>`：使用你自己提供的管理器 APK，路径与文件名均不限。
+
+后两项的详细说明见[选择管理器 APK](#选择管理器-apk)。
 
 #### 修补过程背后的逻辑：
 1. 脚本将原始 `ramdisk.img` 与 `KernelSU.apk` 推送至模拟器的 `/data/local/tmp/ksuAVD/` 临时目录。
@@ -132,6 +136,49 @@ ksuAVD.bat "D:\Android\AVD\Pixel_10_Pro.avd\ramdisk.img"
 6. 将修补后的镜像拉回宿主机并替换原始 `ramdisk.img`。
 7. 通过 ADB 自动安装 KernelSU Next 管理器应用。
 8. 清理模拟器上的临时文件。
+
+---
+
+### 选择管理器 APK
+
+默认情况下，脚本会在 `Apps/` 目录或脚本同级目录中查找 `KernelSU.apk`，两者都没有时
+再从 GitHub 下载最新的 KernelSU Next 正式版。以下两个参数可以覆盖该行为。
+
+**使用上游 CI 构建版本（尚未正式发布）。** 在
+[Actions 页面](https://github.com/KernelSU-Next/KernelSU-Next/actions)
+找到目标运行记录，传入其 run id 或完整 URL：
+
+```bash
+./ksuAVD.sh "path/to/ramdisk.img" ci=38912876962
+./ksuAVD.sh "path/to/ramdisk.img" ci=https://github.com/KernelSU-Next/KernelSU-Next/actions/runs/38912876962
+```
+
+追加 `spoofed` 即可取用同一次运行中的伪装包名版本：
+
+```bash
+./ksuAVD.sh "path/to/ramdisk.img" ci=38912876962 spoofed
+```
+
+只有 **Build Manager CI** 工作流会产出管理器 APK，对应产物名为 `manager` 与
+`manager-spoofed`。该仓库中大量成功的运行只构建 `ksud`、`ksuinit` 或 LKM 模块，
+并不包含任何 APK；此外 GitHub 会在运行结束 90 天后删除产物。若目标产物不存在，
+脚本会直接给出提示并附上该运行的链接，而不会让修补过程失败。
+
+下载时优先使用已登录的 `gh` CLI，如不可用则回退到
+[nightly.link](https://nightly.link)，它无需 token 即可镜像公开仓库的产物。
+APK 会缓存为 `Apps/KernelSU-ci-<run-id>.apk`（伪装包名版本为
+`Apps/KernelSU-ci-<run-id>-spoofed.apk`），再次传入同一 run id 不会重复下载。
+
+**使用自备 APK。** 路径与文件名均不限，也可以是你自行编译的管理器：
+
+```bash
+./ksuAVD.sh "path/to/ramdisk.img" apk=/home/me/builds/my-kernelsu-next.apk
+```
+
+优先级为：`apk=` 高于 `ci=`，`ci=` 高于目录中的现成文件，最后才是最新正式版。
+`apk=` 与 `ci=` 不能同时使用。无论来自哪个来源，只要 APK 中不含
+`lib/<abi>/libksud.so`，脚本都会在向模拟器推送任何文件之前直接报错退出，
+因为 `ksud` 正是从该文件中提取的。
 
 ---
 

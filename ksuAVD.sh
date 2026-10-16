@@ -10,6 +10,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPS_DIR="$SCRIPT_DIR/Apps"
 ADB_REMOTE_TMP="/data/local/tmp/ksuAVD"
+UPSTREAM_REPO="KernelSU-Next/KernelSU-Next"
 
 # Detect if running on Android device or on host machine
 is_device() {
@@ -189,11 +190,140 @@ show_device_status() {
     echo ""
 }
 
+# Reject an APK that cannot supply ksud, before anything is pushed. Without
+# lib/<abi>/libksud.so the device-side stage fails much later and much less
+# obviously, inside the emulator.
+verify_manager_apk() {
+    APK_TO_CHECK="$1"
+    if ! command -v unzip >/dev/null 2>&1; then
+        return 0
+    fi
+    if unzip -l "$APK_TO_CHECK" 2>/dev/null | grep -q "lib/.*/libksud\.so"; then
+        return 0
+    fi
+    echo "[x] Error: this does not look like a KernelSU Next manager APK:"
+    echo "    $APK_TO_CHECK"
+    echo "    It contains no lib/<abi>/libksud.so, so ksud cannot be extracted."
+    return 1
+}
+
+# Accepts a bare run id, or any Actions URL that contains /runs/<id>.
+parse_run_id() {
+    RUN_ID_RAW="$1"
+    case "$RUN_ID_RAW" in
+        *runs/*)
+            RUN_ID="${RUN_ID_RAW#*runs/}"
+            RUN_ID="${RUN_ID%%/*}"
+            RUN_ID="${RUN_ID%%\?*}"
+            ;;
+        *)
+            RUN_ID="$RUN_ID_RAW"
+            ;;
+    esac
+    case "$RUN_ID" in
+        ''|*[!0-9]*)
+            echo "[x] Error: could not read a run id from:"
+            echo "    $RUN_ID_RAW"
+            echo "    Pass the numeric run id, or the full Actions URL of the run."
+            exit 1
+            ;;
+    esac
+}
+
+fetch_ci_apk() {
+    parse_run_id "$KSU_CI_RUN"
+
+    if [ "$KSU_FLAVOR" = "spoofed" ]; then
+        CI_ARTIFACT="manager-spoofed"
+        CI_CACHE="$APPS_DIR/KernelSU-ci-$RUN_ID-spoofed.apk"
+    else
+        CI_ARTIFACT="manager"
+        CI_CACHE="$APPS_DIR/KernelSU-ci-$RUN_ID.apk"
+    fi
+
+    if [ -f "$CI_CACHE" ]; then
+        verify_manager_apk "$CI_CACHE" || exit 1
+        KSU_APK_PATH="$CI_CACHE"
+        echo "[-] Using cached CI build: $KSU_APK_PATH"
+        return 0
+    fi
+
+    echo "[*] Fetching artifact \"$CI_ARTIFACT\" from $UPSTREAM_REPO run $RUN_ID..."
+    mkdir -p "$APPS_DIR"
+    CI_TMP="$APPS_DIR/.ci-$RUN_ID"
+    rm -rf "$CI_TMP"
+    mkdir -p "$CI_TMP"
+
+    CI_OK=0
+    if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+        echo "[-] Downloading with the gh CLI..."
+        if gh run download "$RUN_ID" -R "$UPSTREAM_REPO" -n "$CI_ARTIFACT" -D "$CI_TMP" >/dev/null 2>&1; then
+            CI_OK=1
+        else
+            echo "[!] gh could not fetch \"$CI_ARTIFACT\" from that run."
+        fi
+    fi
+
+    if [ "$CI_OK" -eq 0 ]; then
+        # GitHub's own artifact endpoint requires a token. nightly.link mirrors
+        # artifacts of public repositories without one.
+        CI_URL="https://nightly.link/$UPSTREAM_REPO/actions/runs/$RUN_ID/$CI_ARTIFACT.zip"
+        echo "[-] Downloading from $CI_URL"
+        if curl -fsL -o "$CI_TMP/artifact.zip" "$CI_URL"; then
+            unzip -qo "$CI_TMP/artifact.zip" -d "$CI_TMP" 2>/dev/null || true
+            CI_OK=1
+        fi
+    fi
+
+    CI_APK=""
+    if [ "$CI_OK" -eq 1 ]; then
+        CI_APK=$(find "$CI_TMP" -name '*.apk' -type f 2>/dev/null | head -n 1)
+    fi
+
+    if [ -z "$CI_APK" ]; then
+        rm -rf "$CI_TMP"
+        echo "[x] Error: run $RUN_ID has no \"$CI_ARTIFACT\" artifact."
+        echo "    Only \"Build Manager CI\" runs publish manager APKs, and artifacts"
+        echo "    expire 90 days after the run. Check what this run actually built:"
+        echo "    https://github.com/$UPSTREAM_REPO/actions/runs/$RUN_ID"
+        exit 1
+    fi
+
+    # Verify before caching, so a bad artifact never becomes a cache entry that
+    # later runs would pick up.
+    if ! verify_manager_apk "$CI_APK"; then
+        rm -rf "$CI_TMP"
+        exit 1
+    fi
+    mv -f "$CI_APK" "$CI_CACHE"
+    rm -rf "$CI_TMP"
+    KSU_APK_PATH="$CI_CACHE"
+    echo "[V] CI build saved to $KSU_APK_PATH"
+}
+
 ensure_ksu_apk() {
     if [ "$KSU_FLAVOR" = "spoofed" ]; then
         KSU_APK_NAME="KernelSU-spoofed.apk"
     else
         KSU_APK_NAME="KernelSU.apk"
+    fi
+
+    # Source priority: apk= override, ci= artifact, drop-in file, latest release.
+    if [ -n "$KSU_APK_OVERRIDE" ]; then
+        if [ ! -f "$KSU_APK_OVERRIDE" ]; then
+            echo "[x] Error: supplied APK not found:"
+            echo "    $KSU_APK_OVERRIDE"
+            exit 1
+        fi
+        verify_manager_apk "$KSU_APK_OVERRIDE" || exit 1
+        KSU_APK_PATH="$KSU_APK_OVERRIDE"
+        echo "[-] Using supplied manager APK: $KSU_APK_PATH"
+        return 0
+    fi
+
+    if [ -n "$KSU_CI_RUN" ]; then
+        fetch_ci_apk
+        return 0
     fi
 
     if [ -f "$APPS_DIR/$KSU_APK_NAME" ]; then
@@ -218,6 +348,7 @@ ensure_ksu_apk() {
         echo "[-] Downloading from: $LATEST_URL"
         curl -L -o "$APPS_DIR/$KSU_APK_NAME" "$LATEST_URL"
         if [ -f "$APPS_DIR/$KSU_APK_NAME" ]; then
+            verify_manager_apk "$APPS_DIR/$KSU_APK_NAME" || exit 1
             KSU_APK_PATH="$APPS_DIR/$KSU_APK_NAME"
             echo "[V] Downloaded successfully to $KSU_APK_PATH"
             return 0
@@ -271,10 +402,16 @@ show_help_and_images() {
     echo "  ./ksuAVD.sh restore <path_to_ramdisk.img>"
     echo "  ./ksuAVD.sh InstallApps"
     echo ""
-echo "Options:"
-echo "  restore      Restore original ramdisk from ramdisk.img.backup"
-echo "  DEBUG        Keep temporary working files on AVD ($ADB_REMOTE_TMP)"
-echo "  spoofed      Use the spoofed package-ID manager APK variant"
+    echo "Options:"
+    echo "  restore      Restore original ramdisk from ramdisk.img.backup"
+    echo "  DEBUG        Keep temporary working files on AVD ($ADB_REMOTE_TMP)"
+    echo "  spoofed      Use the spoofed package-ID manager APK variant"
+    echo "  ci=<run>     Use the manager APK built by an upstream Actions run,"
+    echo "               before it is released. Takes a run id or an Actions URL."
+    echo "  apk=<path>   Use this manager APK file, at any path or filename."
+    echo ""
+    echo "Manager APK source priority: apk=, then ci=, then a drop-in file in"
+    echo "Apps/ or next to the script, then the latest upstream release."
     echo ""
     echo "--- Available System Images / AVDs Detected on This Machine ---"
     FOUND_COUNT=0
@@ -330,27 +467,42 @@ find_sdk
 find_adb
 
 ARG1="$1"
-ARG2="$2"
 DEBUG_MODE=0
 DO_RESTORE=0
+SHOW_HELP=0
 KSU_FLAVOR="normal"
+KSU_CI_RUN=""
+KSU_APK_OVERRIDE=""
+TARGET_RAMDISK=""
 
 if [ "$ARG1" = "InstallApps" ]; then
     run_install_apps
 fi
 
-if [ "$ARG1" = "restore" ]; then
-    DO_RESTORE=1
-    TARGET_RAMDISK="$2"
-else
-    TARGET_RAMDISK="$1"
+# Keywords are position independent; the first non-keyword argument is the
+# ramdisk path.
+for arg in "$@"; do
+    case "$arg" in
+        restore)             DO_RESTORE=1 ;;
+        DEBUG)               DEBUG_MODE=1 ;;
+        spoofed)             KSU_FLAVOR="spoofed" ;;
+        ci=*)                KSU_CI_RUN="${arg#ci=}" ;;
+        apk=*)               KSU_APK_OVERRIDE="${arg#apk=}" ;;
+        -h|--help|help)      SHOW_HELP=1 ;;
+        *)
+            if [ -z "$TARGET_RAMDISK" ]; then
+                TARGET_RAMDISK="$arg"
+            fi
+            ;;
+    esac
+done
+
+if [ -n "$KSU_CI_RUN" ] && [ -n "$KSU_APK_OVERRIDE" ]; then
+    echo "[x] Error: ci= and apk= cannot be combined. Pick one APK source."
+    exit 1
 fi
 
-if [ "$ARG2" = "restore" ]; then DO_RESTORE=1; fi
-if [ "$ARG2" = "DEBUG" ] || [ "$3" = "DEBUG" ]; then DEBUG_MODE=1; fi
-if [ "$ARG2" = "spoofed" ] || [ "$3" = "spoofed" ]; then KSU_FLAVOR="spoofed"; fi
-
-if [ -z "$TARGET_RAMDISK" ] || [ "$ARG1" = "-h" ] || [ "$ARG1" = "--help" ] || [ "$ARG1" = "help" ]; then
+if [ -z "$TARGET_RAMDISK" ] || [ "$SHOW_HELP" -eq 1 ]; then
     show_banner
     show_device_status
     show_help_and_images

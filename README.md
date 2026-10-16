@@ -120,6 +120,10 @@ Options you can append:
 - `restore` - put the backed-up ramdisk back (see step 5).
 - `DEBUG` - leave the working files on the AVD in `/data/local/tmp/ksuAVD`.
 - `spoofed` - use the spoofed package-ID variant of the manager APK.
+- `ci=<run>` - use the manager APK from an upstream CI run, before it is released.
+- `apk=<path>` - use a manager APK you supply, at any path and any filename.
+
+See [Choosing the manager APK](#choosing-the-manager-apk) for the two new ones.
 
 #### What the script does
 
@@ -131,6 +135,53 @@ Options you can append:
 6. Pulls the patched image back and puts it in place of `ramdisk.img`.
 7. Installs the manager app on the AVD.
 8. Deletes the temporary files from the emulator.
+
+---
+
+### Choosing the manager APK
+
+By default the script looks for `KernelSU.apk` in `Apps/` or next to itself, and
+downloads the latest KernelSU Next release if it finds neither. Two options
+override that.
+
+**Use a build from upstream CI, before it is released.** Open the run on the
+[Actions page](https://github.com/KernelSU-Next/KernelSU-Next/actions) and pass
+either its id or its full URL:
+
+```bash
+./ksuAVD.sh "path/to/ramdisk.img" ci=38912876962
+./ksuAVD.sh "path/to/ramdisk.img" ci=https://github.com/KernelSU-Next/KernelSU-Next/actions/runs/38912876962
+```
+
+Add `spoofed` to take the spoofed variant from the same run:
+
+```bash
+./ksuAVD.sh "path/to/ramdisk.img" ci=38912876962 spoofed
+```
+
+Only **Build Manager CI** runs publish a manager APK, as the artifacts `manager`
+and `manager-spoofed`. Plenty of green runs on that repository build only `ksud`,
+`ksuinit` or the LKM modules and carry no APK at all, and GitHub deletes
+artifacts 90 days after the run. If the artifact is not there you get a message
+saying so and a link to the run, rather than a failed patch.
+
+The download uses the `gh` CLI when it is installed and logged in, and otherwise
+falls back to [nightly.link](https://nightly.link), which mirrors artifacts of
+public repositories without a token. The APK is cached as
+`Apps/KernelSU-ci-<run-id>.apk`, or `Apps/KernelSU-ci-<run-id>-spoofed.apk` for
+the spoofed variant, so passing the same run again does not re-download it.
+
+**Use an APK you supply.** Any path, any filename, including a manager you built
+yourself:
+
+```bash
+./ksuAVD.sh "path/to/ramdisk.img" apk=/home/me/builds/my-kernelsu-next.apk
+```
+
+`apk=` wins over `ci=`, which wins over a drop-in file, which wins over the
+latest release. The two cannot be combined. Whichever source is used, the APK is
+rejected before anything is pushed to the emulator if it contains no
+`lib/<abi>/libksud.so`, because `ksud` is extracted from it.
 
 ---
 
