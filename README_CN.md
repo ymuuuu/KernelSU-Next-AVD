@@ -4,6 +4,8 @@
 
 本项目是 [KernelSU-AVD](https://github.com/HChenX/KernelSU-AVD)（作者 HChenX）的分支，将 Root 方案切换为 KernelSU Next，并延续了 `rootAVD` 的设计思路，目标适配 Android 12 (API 31) 到 Android 16/17 (API 37+) 的现代官方 AVD 镜像。
 
+版本发布和更新会在 Telegram 频道公布：[t.me/ymuulabs](https://t.me/ymuulabs)。
+
 ---
 
 ## 测试状态

@@ -6,6 +6,8 @@ Two scripts do the whole job. They patch the emulator's `ramdisk.img`, install t
 
 This is a fork of [KernelSU-AVD](https://github.com/HChenX/KernelSU-AVD) by HChenX, switched over to KernelSU Next.
 
+Releases and updates are announced on Telegram: [t.me/ymuulabs](https://t.me/ymuulabs).
+
 ---
 
 ## Tested status
