@@ -1,0 +1,3 @@
+# cmd.exe misparses LF-only batch files (labels not found), keep CRLF in the blob
+*.bat -text
+*.cmd -text
