@@ -1,5 +1,16 @@
 # KernelSU-Next-AVD
 
+<p align="center">
+  <a href="https://github.com/ymuuuu/KernelSU-Next-AVD/releases/latest"><img src="https://img.shields.io/github/v/release/ymuuuu/KernelSU-Next-AVD?style=flat&color=0969DA" alt="Latest release" /></a>
+  <a href="https://github.com/ymuuuu/KernelSU-Next-AVD/releases"><img src="https://img.shields.io/github/downloads/ymuuuu/KernelSU-Next-AVD/total?style=flat&color=8957E5" alt="Total downloads across all releases" /></a>
+  <a href="https://github.com/ymuuuu/KernelSU-Next-AVD/stargazers"><img src="https://img.shields.io/github/stars/ymuuuu/KernelSU-Next-AVD?style=flat&label=%E2%98%85&color=E3B341" alt="GitHub stars" /></a>
+  <img src="https://img.shields.io/badge/license-GPL--3.0-F0883E?style=flat" alt="License: GPL-3.0" />
+  <img src="https://img.shields.io/badge/Android%20emulator-x86__64%20%7C%20arm64-3DDC84?style=flat&logo=android&logoColor=white" alt="Platform: Android emulator, x86_64 and arm64" />
+  <a href="https://t.me/ymuulabs"><img src="https://img.shields.io/badge/Telegram-26A5E4?style=flat&logo=telegram&logoColor=white" alt="Telegram channel" /></a>
+  <a href="https://x.com/ymuuu_"><img src="https://img.shields.io/badge/X-000000?style=flat&logo=x&logoColor=white" alt="Follow on X" /></a>
+  <a href="https://paypal.me/ymuu"><img src="https://img.shields.io/badge/PayPal-003087?style=flat&logo=paypal&logoColor=white" alt="Support me on PayPal" /></a>
+</p>
+
 Root an Android Virtual Device (AVD) with **KernelSU Next**, using the GKI loadable kernel module (LKM) method.
 
 Two scripts do the whole job. They patch the emulator's `ramdisk.img`, install the KernelSU Next manager, and keep a backup so you can undo it. It targets official Android Studio emulators from Android 12 (API 31) up to Android 16/17 (API 37+).
